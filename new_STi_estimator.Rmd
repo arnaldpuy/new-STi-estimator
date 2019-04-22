@@ -481,6 +481,13 @@ MAE <- rbindlist(temp, idcol = "Function") %>%
   .[, model.runs:= as.numeric(model.runs)]
 ```
 
+```{r export_MAE, cache=TRUE, dependson="compute_MAE"}
+
+# EXPORT MAE RESULTS ----------------------------------------------------------
+
+fwrite(MAE, "MAE.csv")
+```
+
 ## Plot results
 
 ```{r plot_MAE, cache=TRUE, dependson="compute_MAE", dev="tikz"}
@@ -498,6 +505,32 @@ ggplot(MAE, aes(model.runs, MAE, color = algorithm)) +
        y = "MAE") +
   facet_wrap(~Function, 
              ncol = 4) +
+  theme_bw() +
+  theme(aspect.ratio = 1, 
+        legend.position = "top", 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill = "transparent",
+                                         color = NA),
+        legend.key = element_rect(fill = "transparent",
+                                  color = NA))
+```
+
+```{r plot_MAE2, cache=TRUE, dependson="compute_MAE", dev="tikz", fig.height=3.4, fig.width=4.5}
+
+# PLOT A1 AND A2 FOR SAMPLE SIZES 2^4, 2^5, 2^6 AND 2^7 -----------------------
+
+MAE[model.runs %in% c(112, 224, 448, 896) &
+     Function %in% c("A1", "A2")] %>%
+  ggplot(., aes(model.runs, MAE, color = algorithm)) +
+  geom_point() +
+  geom_line() +
+  scale_color_discrete(name = expression(S[Ti]), 
+                       labels = c("New algorithm", "Jansen 1999")) +
+  scale_y_log10(labels = trans_format("log10", math_format(10^.x))) +
+  labs(x = "Total cost", 
+       y = "MAE") +
+  facet_wrap(~Function, ncol = 2) +
   theme_bw() +
   theme(aspect.ratio = 1, 
         legend.position = "top", 
