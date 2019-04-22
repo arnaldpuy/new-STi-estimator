@@ -218,9 +218,10 @@ computations <- function(x, k) {
 # SOBOL' STi INDICES ----------------------------------------------------------
 
 sobol_compute_Ti <- function(Y_A, Y_AB) {
-  f0 <- (1 / length(Y_A)) * sum(Y_A)
-  VY <- 1 / length(Y_A) * sum((Y_A - f0) ^ 2)
-  STi <- ((1 / (2 * length(Y_A))) * sum((Y_A - Y_AB) ^ 2)) / VY
+  n <- length(Y_A[!is.na(Y_A)])
+  f0 <- (1 / n) * sum(Y_A, na.rm = TRUE)
+  VY <- 1 / n * sum((Y_A - f0) ^ 2, na.rm = TRUE)
+  STi <- ((1 / (2 * n)) * sum((Y_A - Y_AB) ^ 2, na.rm = TRUE)) / VY
   return(STi) 
 }
 
@@ -244,88 +245,9 @@ sobol_Ti <- function(Y, params) {
   # merge vector with data table
   vec <- cbind(Y_A, Y_AB)
   out <- data.table::data.table(vec, parameters)
-  out.1 <- out %>%
-    # remove rows with NA
-    stats::na.omit()
   # Compute Sobol'indices
-  output <- out.1[, sobol_Mapply_Ti(.SD), by = parameters]
+  output <- out[, sobol_Mapply_Ti(.SD), by = parameters]
   return(output)
-}
-```
-
-## New algorithm
-
-```{r new_algorithm, cache=TRUE, dependson=c("test_functions", "functions_matrices", "functions_STi")}
-
-# DEFINE THE NEW ALGORITHM ----------------------------------------------------
-
-new_estimator <- function(sample.size, type, k, params, replicas, model) {
-  # Create vector for the A and AB matrices
-  col_names <- c("A", paste("X", 1:k, sep = ""))
-  # Define the settings
-  setting <- computations(x = sample.size, k)
-  # Create the matrices
-  A <- scrambled_replicas(setting$Nb, k, replicas)
-  names(A) <- 1:replicas
-  # Separate the matrices
-  X <- lapply(A, function(x) separate_matrices(x))
-  # Name the matrices
-  for(i in names(X)) {
-    names(X[[i]]) <- col_names
-  }
-  # Compute model output
-  Y <- lapply(X, function(x) lapply(x, function(y) model(y)))
-  if(type == "old") { # RUN THE TRADITIONAL APPROACH --------------
-    ###############################################################
-    # Compute STi following the traditional approach
-    out <- lapply(Y, function(x) sobol_Ti(do.call(c, x), params))
-    # Finalize
-    final <- rbindlist(out, idcol = "replica") %>%
-      .[, sample.size := setting$Nb] %>%
-      .[, algorithm:= "old"]
-  } 
-  if(type == "new") { # RUN THE NEW ALGORITHM ---------------------
-    ###############################################################
-    # Retrieve model output for the warm-up samples
-    Y.1 <- lapply(Y, function(x) lapply(x, function(y) y[1:setting$Nts]))
-    # Compute Sobol' Ti for the warm-up samples
-    out <- lapply(Y.1, function(x) sobol_Ti(do.call(c, x), params))
-    # Retrieve the fixed parameters
-    STi.fixed <- lapply(out, function(x) 
-      x[V1 < quantile(V1, probs = 1 - 75 / 100)])
-    # Retrieve the non-fixed parameters
-    STi.non.fixed <- lapply(out, function(x) 
-      x[V1 > quantile(V1, probs = 1 - 75 / 100)]) %>%
-      lapply(., function(x) c("A", x[, parameters]))
-    # Retrieve model runs of the non.fixed parameters
-    new.runs <- list()
-    for(i in names(Y)) {
-      new.runs[[i]] <-  Y[[i]][STi.non.fixed[[i]]]
-    }
-    extra.runs <- lapply(new.runs, function(x) 
-      lapply(x, function(y) y[(setting$Nts + 1):setting$Nb]))
-    # unite the vectors of the same simulation
-    temp <- lapply(extra.runs, function(x) c(do.call(cbind, x)))
-    # Retrieve vector with the name of the parameters
-    # with the extra runs
-    new <- lapply(STi.non.fixed, function(x) x[-1])
-    # Compute Sobol' Ti for the extra runs
-    out <- list()
-    for(i in names(temp)) {
-      out[[i]] <- sobol_Ti(temp[[i]], params = new[[i]])
-    }
-    # Cbind the fixed parameters
-    all.together <- list()
-    for(i in names(out)) {
-      all.together[[i]] <- rbind(out[[i]], STi.fixed[[i]]) %>%
-        .[order(parameters)]
-    }
-    # Finalize
-    final <- rbindlist(all.together, idcol = "replica") %>%
-      .[, sample.size := setting$Nb] %>%
-      .[, algorithm:= "new"]
-  }
-  return(final)
 }
 ```
 
@@ -345,6 +267,23 @@ analytical <- melt(AE, id.vars = "Function") %>%
 ```
 
 # Run the model
+
+We compare the performance of the @Jansen1999 estimator with the new algorithm at $n$ sample sizes, for $n=2^4, 2^5,...,2^{13}$. At each sample size, we create a Sobol' matrix ($50n,2k$): from row 1 to $n$ is the first replica, from row $n+1$ to $2n$ is the second replica, and so on until the fifty replica. The first $k$ matrix is labelled $\textbf{A}$ and the second $k$ matrix is labelled $\textbf{B}$. 
+
+For each replica, we create $k$ additional matrices ${\textbf{A}^i_{\textbf{B}}}$, $i=1,2,...,k$, where the $k$ matrix is composed of all columns of the $\textbf{A}$ matrix except the $i$-th column, which is the $i$-th column of the $\textbf{B}$ matrix. Following @Saltelli2010a, we use only the $\textbf{A}$ and the ${\textbf{A}^i_{\textbf{B}}}$ matrices as we only compute the total sensitivity index $S_{Ti}$.
+
+At a given sample size $n$, our algorithm proceeds as follows: we run a test function in the $\textbf{A}$ matrix and in each ${\textbf{A}^i_{\textbf{B}}}$ matrix, thus obtaining $1+k$ vectors of size $n$ with the model output $Y$. The total number of runs to compute $S_{Ti}$ is thus $n(1 + k)$.
+
+From each of these vectors of size $n$, we retrieve the first $\frac{1}{4}$ values, and compute $S_{Ti}$. This is the "warm-up" sample in our paper. We observe the results of the sensitivity analysis, and freeze $\frac{1}{4}$ of the parameters (those 2 with the lowest $S_{Ti}$; they will be retrieved later on). The other $\frac{3}{4}$ of each vector is the "saved sample".
+
+Let's recapitulate at this point to see how our algorithm allows to save some model runs. For instance, let's assume that $n=16$. At this stage, we have used a total of 88 model runs: $\frac{1}{4} n$ have been applied to the $\textbf{A}$ matrix and to each ${\textbf{A}^i_{\textbf{B}}}$ ($4 * 7=28$);  plus $\frac{3}{4} n$ have been applied to the $\textbf{A}$ matrix and the ${\textbf{A}^i_{\textbf{B}}}$ matrices of the 4 most important parameters ($12*5=60$). This means that we have 24 extra runs ($\big[n(k+1)\big] -88=24$; $112-88=24$) to divide into the 4 most important parameters to improve their estimation (6 extra model runs per parameter).
+
+We then retrieve the ${\textbf{A}^i_{\textbf{B}}}$ matrices of those parameters that have not been fixed, and for each one of them, we select the 6 rows where we will compute the extra model runs. The $i-th$ column of each ${\textbf{A}^i_{\textbf{B}}}$ matrix is substituted by a vector of size $\frac{1}{4} n$ formed by randomly distributed numbers within [0, 1]. We will call this new matrices ${\textbf{A}^i_{\textbf{X}}}$ matrices. We compute the test function in each ${\textbf{A}^i_{\textbf{X}}}$ matrix, and obtain 4 vectors of size $\frac{1}{4} n$ with the model output $Y$ obtained using the new sampled points; this is the "extra sample" in our paper. 
+
+At this stage, and for each non-fixed parameter, we have computed $n$ effects $f({\textbf{A}} - {\textbf{A}^i_{\textbf{B}}})$; a total of 64 if $n=16$.  With the new effects $f({\textbf{A}} - {\textbf{A}^i_{\textbf{X}}})$ and $f({\textbf{A}^i_{\textbf{B}}} - {\textbf{A}^i_{\textbf{X}}})$, we can add $\frac{1}{4}n$ * 2 (12) extra effects to each non-fixed model input, thus gaining 48 extra effects overall. Thus, for a sample size of $n=16$ (total sample size of 112), the $\frac{3}{4}$ most important factors have received 22 runs each; six extra runs each. The two less important factors have received $\frac{1}{4} n$ runs each (4 runs each). Jointly with the runs conducted on the $\textbf{A}$ matrix ($n$), this adds up to $n(k+1)$ runs, a total of 112. As for the number of effects, the less important factors have received a number of effects of $\frac{1}{4}n$ (4) each, and the most important factors have received $n + \frac{3}{4}n$ (28) each.
+
+After computing the $S_{Ti}$ for the non-fixed parameters, we merge the results with the $S_{Ti}$ of the fixed parameters.
+
 
 ## Define settings
 
@@ -367,6 +306,119 @@ params <- paste("X", 1:k, sep = "")
 
 # Set number of sample matrix replicas
 replicas <- 50
+```
+
+## New algorithm
+
+```{r new_algorithm, cache=TRUE, dependson=c("test_functions", "functions_matrices", "functions_STi")}
+
+# DEFINE THE NEW ALGORITHM ----------------------------------------------------
+
+# Define the new estimator
+new_estimator <- function(A, sample.size, params, model, type) {
+  settings <- computations(sample.size, length(params))
+  # Compute model output on the initial sample size
+  Y.initial <- model(A) 
+  if(type == "old") { # RUN THE TRADITIONAL APPROACH --------------
+    ###############################################################
+    output <- sobol_Ti(Y.initial, params) %>%
+      .[, model.runs := settings$Nc] %>%
+      .[, algorithm:= "old"]
+  }
+  if(type == "new") { # RUN THE NEW ALGORITHM ---------------------
+    ###############################################################
+    # Add a column with the parameters and the model output
+    A <- data.table(A)[, Y:= cbind(Y.initial)] %>%
+      .[, parameters:= rep(c("A", params), each = settings$Nb)] %>%
+      setnames(., paste("V", 1:k, sep = ""), paste("X", 1:k, sep = ""))
+    
+    # STi ON THE WARM UP SAMPLE ---------------------------------------------------
+    STi.warmup <- sobol_Ti(A[, .SD[1:settings$Nts], parameters][, Y], params)
+    # Retrieve a vector with the non-fixed parameters
+    STi.non.fixed <- STi.warmup[V1 > quantile(V1, probs = 1 - 75 / 100)][, parameters]
+    # Vector with the A and the non-fixed parameters
+    A.STi.non.fixed <- c("A", STi.non.fixed)
+    # Retrieve the STi indices of the fixed parameters
+    STi.fixed <- STi.warmup[V1 < quantile(V1, probs = 1 - 75 / 100)]
+    
+    # RETRIEVE ALL RUNS FOR THE MOST IMPORTANT PARAMETERS---------------------------
+    YA <- A[parameters %in% A.STi.non.fixed]
+    Y <- YA[, Y]
+    
+    # RUN EXTRA RUNS ---------------------------------------------------------------
+    # Retrieve 1/4 of the rows of the AB matrices of the most
+    # important parameters to compute the extra model runs
+    AX <- A[parameters %in% STi.non.fixed][
+      , .SD[1:((1+settings$Nextra) - 1)], parameters][, !"Y"] 
+    # Substitute the column of the j parameter for a random numer
+    set.seed(666)
+    for(j in colnames(AX[, 2:6])) {
+      AX[parameters == j, j] <- runif(settings$Nextra)
+    }
+    # Compute model output
+    Y.extra <- model(as.matrix(AX[, -1]))
+    # Add model output
+    AX <- data.table(AX)[, Y_AX:= cbind(Y.extra)]
+    # Create a vector with the new points located at the proper place
+    AY.extra <- AX[, c(Y_AX, rep(NA, settings$Nts+settings$Nextra)), parameters]
+    # ADD NA to cover the A matrix
+    temp <- rbind(data.table(parameters = "A", V1 = rep(NA, settings$Nb)), 
+                  AY.extra) %>%
+      .[, .(V1)] %>%
+      setnames(., "V1", "Y_AX")
+    # Bind
+    Y_AX <- cbind(YA, temp)[!parameters == "A"][, Y_AX]
+    Yprove <- c(Y, Y_AX)
+    
+    # Calculate the number of parameters
+    k <- length(STi.non.fixed)
+    # Extract the model output of the A matrix
+    p <- length(1:(length(Yprove) / ((2 * k) + 1)))
+    # Extract the model output of the A matrix
+    Y_A <- Y[1:p]
+    # Extract the model output of the AB matrix
+    Y_AB <- Y[(p+1): (p * (k + 1))]
+    # Extract the model output of the AX matrix
+    Y_AX <- Yprove[(p * (k + 1) + 1): length(Yprove)]
+    # Create vector with parameters
+    parameters <- rep(STi.non.fixed, each = length(Y_A))
+    # merge vector with data table
+    vec <- cbind(Y_A, Y_AB, Y_AX)
+    out <- data.table::data.table(vec, parameters)
+    
+    # Define parameters
+    n <- length(Y_A[!is.na(Y_A)])
+    f0 <- (1 / n) * sum(Y_A, na.rm = TRUE)
+    VY <- 1 / n * sum((Y_A - f0) ^ 2, na.rm = TRUE)
+    
+    # Compute
+    first <- out[, .(parameters, Y_A, Y_AB)] %>%
+      setnames(., c("Y_A", "Y_AB"), c("one", "two"))
+    second <- out[, .(parameters, Y_A, Y_AX)] %>%
+      na.omit() %>%
+      setnames(., c("Y_A", "Y_AX"), c("one", "two"))
+    third <- out[, .(parameters, Y_AB, Y_AX)] %>%
+      na.omit() %>%
+      setnames(., c("Y_AB", "Y_AX"), c("one", "two"))
+    # Calculate output
+    output <- rbind(first, second, third) %>%
+      .[order(parameters)] %>%
+      .[, ((1 / (2 * .N)) * sum((one - two) ^ 2, na.rm = TRUE)) / VY, parameters] %>%
+      rbind(., STi.fixed) %>%
+      .[order(parameters)] %>%
+      .[, model.runs := settings$Nc] %>%
+      .[, algorithm:= "new"]
+  }
+  return(output)
+}
+
+# Define the new algorithm
+new_algorithm <- function(sample.size, params, model, type, replicas) {
+  settings <- computations(sample.size, length(params))
+  A <- scrambled_replicas(settings$Nb, k = length(params), replicas)
+  out <- lapply(A, function(x) new_estimator(x, sample.size, params, model, type))
+  return(out)
+}
 ```
 
 ## Run the model
@@ -395,13 +447,13 @@ for(i in names(run_model)) {
   } else if(i == "C2") {
     test_F <- C2
   }
-  out[[i]] <- lapply(estimators, function(x)
-    lapply(Nb, function(Nb) new_estimator(sample.size = Nb, 
-                                          type = x, 
-                                          k = k, 
+  out[[i]] <- mclapply(estimators, function(x) 
+    lapply(Nb, function(Nb) new_algorithm(Nb, 
                                           params = params, 
-                                          replicas = replicas, 
-                                          model = test_F)))
+                                          model = test_F, 
+                                          type = x, 
+                                          replicas = replicas)), 
+    mc.cores = detectCores() - 1)
 }
 ```
 
@@ -412,9 +464,10 @@ for(i in names(run_model)) {
 # COMPUTE MAE -----------------------------------------------------------------
 
 # Arrange data
-temp <- lapply(out, function(x) 
-  lapply(x, function(y) rbindlist(y))) %>%
-  lapply(., function(x) rbindlist(x))
+temp <- lapply(out, function(x) lapply(x, function(y) 
+  lapply(y, function(z) rbindlist(z, idcol = "replicas")))) %>%
+  lapply(., function(x) lapply(x, function(y) rbindlist(y, idcol = "N"))) %>%
+  lapply(., function(x) rbindlist(x)) 
 
 # Merge indices with analytical values
 for(i in names(temp)) {
@@ -425,8 +478,8 @@ for(i in names(temp)) {
 MAE <- rbindlist(temp, idcol = "Function") %>%
   setnames(., c("V1", "value"), c("estimated", "analytical")) %>%
   .[, .(MAE = mean(abs(estimated - analytical))), 
-    .(Function, sample.size, algorithm)] %>%
-  .[, sample.size:= as.numeric(sample.size)]
+    .(Function, model.runs, algorithm)] %>%
+  .[, model.runs:= as.numeric(model.runs)]
 ```
 
 ## Plot results
@@ -435,13 +488,13 @@ MAE <- rbindlist(temp, idcol = "Function") %>%
 
 # PLOT MAE --------------------------------------------------------------------
 
-ggplot(MAE, aes(sample.size, MAE, color = algorithm)) +
+ggplot(MAE, aes(model.runs, MAE, color = algorithm)) +
   geom_point() +
   geom_line() +
   scale_color_discrete(name = expression(S[Ti]), 
                        labels = c("New algorithm", "Jansen 1999")) +
-  scale_x_log10(labels = trans_format("log10", math_format(10^.x))) +
   scale_y_log10(labels = trans_format("log10", math_format(10^.x))) +
+  scale_x_log10(labels = trans_format("log10", math_format(10^.x))) +
   labs(x = "Total cost", 
        y = "MAE") +
   facet_wrap(~Function, 
@@ -456,3 +509,5 @@ ggplot(MAE, aes(sample.size, MAE, color = algorithm)) +
         legend.key = element_rect(fill = "transparent",
                                   color = NA))
 ```
+
+# References
